@@ -1,0 +1,377 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookmark-manager
+---
+# PostgreSQL ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: bookmark-manager
+data:
+  POSTGRES_DB: bookmarks
+  POSTGRES_USER: postgres
+---
+# PostgreSQL Secret (credentials)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: bookmark-manager
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: change-me-in-production
+---
+# PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: bookmark-manager
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        - secretRef:
+            name: postgres-secret
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U postgres -d bookmarks
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U postgres -d bookmarks
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: bookmark-manager
+spec:
+  ports:
+  - port: 5432
+  clusterIP: None
+  selector:
+    app: postgres
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: bookmark-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - redis-cli ping
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - redis-cli ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: redis-data
+        emptyDir: {}
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: bookmark-manager
+spec:
+  ports:
+  - port: 6379
+  selector:
+    app: redis
+---
+# Django ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: django-config
+  namespace: bookmark-manager
+data:
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: bookmarks
+  DB_USER: postgres
+  REDIS_URL: redis://redis:6379/0
+  DEBUG: "0"
+---
+# Django Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: django-secret
+  namespace: bookmark-manager
+type: Opaque
+stringData:
+  SECRET_KEY: change-this-to-a-long-random-string-in-production
+  DB_PASSWORD: change-me-in-production
+---
+# Django Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django
+  namespace: bookmark-manager
+spec:
+  replicas: 3  # 3 replicas for high availability
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: django
+  template:
+    metadata:
+      labels:
+        app: django
+    spec:
+      initContainers:
+      # Run migrations before starting app
+      - name: migrate
+        image: bookmark-manager-web:latest
+        command: ["sh", "-c", "PYTHONPATH=/app python bookmarks/django_manage.py migrate --noinput"]
+        envFrom:
+        - configMapRef:
+            name: django-config
+        - secretRef:
+            name: django-secret
+      # Collect static files
+      - name: collectstatic
+        image: bookmark-manager-web:latest
+        command: ["sh", "-c", "PYTHONPATH=/app python bookmarks/django_manage.py collectstatic --noinput"]
+        envFrom:
+        - configMapRef:
+            name: django-config
+        - secretRef:
+            name: django-secret
+        volumeMounts:
+        - name: static-files
+          mountPath: /app/staticfiles
+      containers:
+      - name: django
+        image: bookmark-manager-web:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        envFrom:
+        - configMapRef:
+            name: django-config
+        - secretRef:
+            name: django-secret
+        volumeMounts:
+        - name: static-files
+          mountPath: /app/staticfiles
+        livenessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /ready/
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: static-files
+        emptyDir: {}
+---
+# Django Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: django
+  namespace: bookmark-manager
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+  selector:
+    app: django
+---
+# Nginx Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: bookmark-manager
+spec:
+  replicas: 2  # 2 replicas for HA
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: bookmark-manager-nginx:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80
+          name: http
+        - containerPort: 443
+          name: https
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+---
+# Nginx Service (LoadBalancer)
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: bookmark-manager
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 443
+    protocol: TCP
+    name: https
+  selector:
+    app: nginx
+---
+# Horizontal Pod Autoscaler for Django
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: django-hpa
+  namespace: bookmark-manager
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: django
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

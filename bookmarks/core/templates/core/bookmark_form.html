@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Add Bookmark</title>
+</head>
+<body>
+    <h1>Add a New Bookmark</h1>
+    <form method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit">Add Bookmark</button>
+    </form>
+    <p><a href="{% url 'bookmark-list' %}">Back to Bookmarks</a></p>
+</body>
+</html>

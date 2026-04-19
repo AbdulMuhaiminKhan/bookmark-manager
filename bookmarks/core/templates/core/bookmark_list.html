@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bookmark Manager</title>
+</head>
+<body>
+    <h1>My Bookmarks</h1>
+    <p><a href="{% url 'bookmark-add' %}">Add New Bookmark</a></p>
+    <ul>
+        {% for bookmark in bookmarks %}
+            <li><a href="{{ bookmark.url }}">{{ bookmark.title }}</a> (added {{ bookmark.created_at }})</li>
+        {% empty %}
+            <li>No bookmarks yet.</li>
+        {% endfor %}
+    </ul>
+    <p>Cache status: The list updates every 60 seconds (Redis caching).</p>
+</body>
+</html>

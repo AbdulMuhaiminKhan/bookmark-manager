@@ -1,0 +1,71 @@
+services:
+  db:
+    image: postgres:15
+    container_name: bookmark_db
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # Managed volume for persistence
+    ports:
+      - "5433:5432"                              # Expose for local tools
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: bookmark_redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+  web:
+    build: .
+    container_name: bookmark_web
+    command: >
+      sh -c "PYTHONPATH=/app python bookmarks/django_manage.py migrate &&
+             PYTHONPATH=/app python bookmarks/django_manage.py collectstatic --noinput &&
+             PYTHONPATH=/app gunicorn bookmarks.wsgi:application --bind 0.0.0.0:8000"
+    volumes:
+      - .:/app                      # Bind mount for live code reload (dev)
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    environment:
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=${DEBUG}
+    depends_on:
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+    expose:
+      - "8000"
+
+  nginx:
+    build: ./nginx
+    container_name: bookmark_nginx
+    volumes:
+      - static_volume:/static
+      - media_volume:/media
+    ports:
+      - "80:80"
+    depends_on:
+      web:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  media_volume:
